@@ -1,3 +1,13 @@
+/////////////////////////////////////////////////////
+// auto_encode.c - Encode dataset with autoencoder //
+/////////////////////////////////////////////////////
+// Andrew Valentine                                //
+// Universiteit Utrecht                            //
+// 2011-2012                                       //
+/////////////////////////////////////////////////////
+// $Id: auto_encode.c,v 1.2 2012/03/31 15:21:00 andrew Exp $
+
+
 #include<stdlib.h>
 #include<stdio.h>
 #include "autoencoder.h"

@@ -1,3 +1,16 @@
+////////////////////////////////////////////////////////////
+// autoencoder.c - Main library for autoencoder framework //
+////////////////////////////////////////////////////////////
+// Andrew Valentine                                       //
+// Universiteit Utrecht                                   //
+// 2011-2012                                              //
+////////////////////////////////////////////////////////////
+// $Id: autoencoder.c,v 1.3 2012/03/31 15:14:51 andrew Exp andrew $
+//
+// Compile with -DACML if using ACML library; otherwise will require cblas library.
+// If not using ACML, requires libtwist (Mersenne twister code) or compile with -DNATIVE_RAND to use the C standard 'rand' function
+// Turn on openmp directives in compiler to enable full parallelism (shared-memory only)
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -6,21 +19,22 @@
 #include <acml.h>
 #else
 #include <cblas.h>
+#ifndef NATIVE_RAND //Use Mersenne Twister; only if not ACML
+#include "mt19937ar.h"
+#endif
 #endif
 #include <assert.h>
 #include <signal.h>
 #include "autoencoder.h"
-#ifndef NATIVE_RAND //Use Mersenne Twister
-#include "mt19937ar.h"
-#endif
 
-volatile cease_training=0;
-
+volatile sig_atomic_t cease_training=0; //Flag to handle Ctrl-C
+volatile int AUTO_BINARY_MODE=1;
 
 ///////////////////////
 // Dataset functions //
 ///////////////////////
 void dataset_alloc(dataset_t *data,int npts,int nrecs){
+  //Allocate memory for dataset storage: nrecs records, each containing npts points
   data->npoints=npts;
   data->nrecs=nrecs;
   data->data=malloc(npts*nrecs*sizeof(double));
@@ -28,6 +42,7 @@ void dataset_alloc(dataset_t *data,int npts,int nrecs){
   data->weight=malloc(nrecs*sizeof(double));
 }
 void dataset_free(dataset_t *data){
+  //Free previously allocated dataset
   data->npoints=-1;
   data->nrecs=-1;
   free(data->data);
@@ -36,6 +51,7 @@ void dataset_free(dataset_t *data){
 }
 
 void dataset_copy(dataset_t *dest,dataset_t *src){
+  //Make a copy of existing data structure in memory
   dataset_alloc(dest,src->npoints,src->nrecs);
   memcpy(dest->data,src->data,src->npoints*src->nrecs*sizeof(double));
   memcpy(dest->weight,src->weight,src->nrecs*sizeof(double));
@@ -43,6 +59,7 @@ void dataset_copy(dataset_t *dest,dataset_t *src){
 }
 
 void dataset_resize(dataset_t *data,int newnrecs){
+  //Resize dataset (change nrecs only). realloc *should* preserve existing memory contents.
   data->data=realloc(data->data,newnrecs*data->npoints*sizeof(double));
   data->weight=realloc(data->weight,newnrecs*sizeof(double));
   data->scale=realloc(data->scale,newnrecs*sizeof(double));
@@ -60,50 +77,199 @@ void dataset_resize(dataset_t *data,int newnrecs){
 }
 
 dataset_t load_dataset(char *filename){
+  //Open file and read in dataset
+  dataset_t data;
+  int npts,nrecs,check;
   FILE *fp;
-  if((fp=fopen(filename,"r"))==NULL){
-    printf("Error opening file: %s\n",*filename);
+  if((fp=fopen(filename,"rb"))==NULL){
+    printf("Error opening file: %s\n",filename);
     abort();
   }
-  int npts,nrecs;
-  if(fscanf(fp,"%d%d",&npts,&nrecs)!=2){printf("Error reading from file: %s\n",*filename);printf("Have npts=%i & nrecs=%i\n",npts,nrecs);abort();}
-  dataset_t data;
-  dataset_alloc(&data,npts,nrecs);
-  int i,j;
-  for (j=0;j<nrecs;j++){
-    for(i=0;i<npts;i++){
-      //      printf("%i %i\n",i,j);
-      if(fscanf(fp,"%lf",data.data+(i*(nrecs)+j))!=1){printf("Error reading data from file: %s\n",*filename);printf("Failed to read data[%i*(nrecs)+%i]\n",i,j);abort();}
+  fread(&check,sizeof(int),1,fp);
+  if(check==0){ 
+    AUTO_BINARY_MODE=1;
+    if(fread(&npts,sizeof(int),1,fp)!=1){printf("Error reading from file: %s\n",filename);printf("Failed to read npts\n");abort();}
+    if(fread(&nrecs,sizeof(int),1,fp)!=1){printf("Error reading from file: %s\n",filename);printf("Failed to read nrecs\n");abort();}
+    dataset_alloc(&data,npts,nrecs);
+    if(fread(data.data,sizeof(double),npts*nrecs,fp)!=npts*nrecs){printf("Error reading from file: %s\n",filename);printf("Failed to read data\n");abort();}
+    if(fread(data.scale,sizeof(double),nrecs,fp)!=nrecs){printf("Error reading from file: %s\n",filename);printf("Failed to read scale\n");abort();}
+    if(fread(data.weight,sizeof(double),nrecs,fp)!=nrecs){printf("Error reading from file: %s\n",filename);printf("Failed to read weights\n");abort();}
+    fclose(fp);
+  } else {
+    AUTO_BINARY_MODE=0;
+    fclose(fp);
+    if((fp=fopen(filename,"r"))==NULL){
+      printf("Error opening file: %s\n",filename);
+      abort();
     }
-    if(fscanf(fp,"%le",data.scale+j)!=1){printf("Error reading scale from file: %s\n",*filename);abort();}
-    if(fscanf(fp,"%le",data.weight+j)!=1){printf("Error reading weight from file: %s\n",*filename);abort();}
+    if(fscanf(fp,"%d%d",&npts,&nrecs)!=2){printf("Error reading from file: %s\n",filename);printf("Have npts=%i & nrecs=%i\n",npts,nrecs);abort();}
+    dataset_alloc(&data,npts,nrecs);
+    int i,j;
+    for (j=0;j<nrecs;j++){
+      for(i=0;i<npts;i++){
+	//      printf("%i %i\n",i,j);
+	if(fscanf(fp,"%lf",data.data+(i*(nrecs)+j))!=1){printf("Error reading data from file: %s\n",filename);printf("Failed to read data[%i*(nrecs)+%i]\n",i,j);abort();}
+      }
+      if(fscanf(fp,"%le",data.scale+j)!=1){printf("Error reading scale from file: %s\n",filename);printf("Failed to read scale[%i]\n",j);abort();}
+      if(fscanf(fp,"%le",data.weight+j)!=1){printf("Error reading weight from file: %s\n",filename);printf("Failed to read weight[%i]\n",j);abort();}
+    }
+    fclose(fp);
   }
-  fclose(fp);
+  double t;
+  int ii,jj;
+  printf("npts=%i,nrecs=%i\n",npts,nrecs);
+  t=0.;
+  for (jj=0;jj<nrecs;jj++){
+    for(ii=0;ii<npts;ii++){
+      t+=*(data.data+(ii*nrecs)+jj);
+    }
+  }
+  printf("tda=%f\n",t);
+  t=0.;
+  for(jj=0;jj<nrecs;jj++){
+    t+=*(data.scale+jj);
+  }
+  printf("tsc=%f\n",t);
+  t=0.;
+  for(jj=0;jj<nrecs;jj++){
+    t+=*(data.weight+jj);
+  }
+  printf("twt=%f\n\n");
+
+
   return data;
 }
 
 void writedata(char *filename,dataset_t *data){
-  FILE *fp;
-  if((fp=fopen(filename,"w"))==NULL){printf("Error opening file: %s\n",filename);abort();}
-  int i,j;
-  fprintf(fp,"%06i %04i\n",data->npoints,data->nrecs);
-  for(j=0;j<data->nrecs;j++){
-    for(i=0;i<data->npoints;i++){
-      fprintf(fp,"%8.5f ",*(data->data+(i*data->nrecs)+j));
+  //Write dataset to a file
+  if(AUTO_BINARY_MODE==1){
+    FILE *fp;
+    int check=0;
+    if((fp=fopen(filename,"wb"))==NULL){printf("Error opening file: %s\n",filename);abort();}
+    fwrite(&check,sizeof(int),1,fp); //To indicate that this is a binary file...
+    fwrite(&(data->npoints),sizeof(int),1,fp);
+    fwrite(&(data->nrecs),sizeof(int),1,fp);
+    fwrite(data->data,sizeof(double),data->nrecs*data->npoints,fp);
+    fwrite(data->scale,sizeof(double),data->nrecs,fp);
+    fwrite(data->weight,sizeof(double),data->nrecs,fp);
+    fclose(fp);
+  } else {
+    FILE *fp;
+    if((fp=fopen(filename,"w"))==NULL){printf("Error opening file: %s\n",filename);abort();}
+    int i,j;
+    fprintf(fp,"%06i %04i\n",data->npoints,data->nrecs);
+    for(j=0;j<data->nrecs;j++){
+      for(i=0;i<data->npoints;i++){
+	fprintf(fp,"%8.5f ",*(data->data+(i*data->nrecs)+j));
+      }
+      fprintf(fp,"%11.5e %11.5e\n",*(data->scale+j),*(data->weight+j));
     }
-    fprintf(fp,"%11.5e %11.5e\n",*(data->scale+j),*(data->weight+j));
+    fclose(fp);
   }
-  fclose(fp);
 }
 
+int get_binary_mode(){
+  return AUTO_BINARY_MODE;
+}
 
+void set_binary_mode(int m){
+  AUTO_BINARY_MODE=m;
+}
 
 /////////////////////////////
 // Random number functions //
 /////////////////////////////
+volatile int seeded_random=0;//Has random seed been initialised?
+#ifdef ACML
+int lstate=633;
+int state[633];
+void random_uniform_mem(double *start,int n, double lo,double hi){
+  //Fill memory block with uniformly-distributed random numbers
+  int info=0;
+  if(seeded_random==0){
+    int lseed=1;
+    int seed=(unsigned)time(NULL)+getpid();
+    drandinitialize(3,0,&seed,&lseed,state,&lstate,&info);
+    if(info!=0) {
+      printf("Error initializing random number generator; aborting...\n");
+      exit(-1);
+    }
+    seeded_random=1;
+  }
+  dranduniform(n,lo,hi,state,start,&info);
+  if(info!=0){
+    printf("Error in random number generation; aborting...\n");
+    exit(-1);
+  }
+}
+
+void random_normal_mem(double *start, int n, double stdev){
+  //Fill memory block with gaussian-distributed random numbers
+  int info=0;
+  if(seeded_random==0){
+    int lseed=1;
+    int seed=(unsigned)time(NULL)+getpid();
+    drandinitialize(3,0,&seed,&lseed,state,&lstate,&info);
+    if(info!=0) {
+      printf("Error initializing random number generator; aborting...\n");
+      exit(-1);
+    }
+    seeded_random=1;
+  }
+  drandgaussian(n,0.0,stdev,state,start,&info);
+  if(info!=0){
+    printf("Error in random number generation; aborting...\n");
+    exit(-1);
+  }
+}
+
+inline double random_uniform(double lo,double hi){
+  //Return a random number from a uniform distribution in [lo,hi]
+  int info=0;
+  if(seeded_random==0){
+    int lseed=1;
+    int seed=(unsigned)time(NULL)+getpid();
+    drandinitialize(3,0,&seed,&lseed,state,&lstate,&info);
+    if(info!=0) {
+      printf("Error initializing random number generator; aborting...\n");
+      exit(-1);
+    }
+    seeded_random=1;
+  }
+  double r;
+  dranduniform(1,lo,hi,state,&r,&info);
+  if(info!=0){
+    printf("Error in random number generation; aborting...\n");
+    exit(-1);
+  }
+  return r;
+}
+
+inline double random_normal(){
+  //Return a random number from a Gaussian with unit stdev
+  int info=0;
+  if(seeded_random==0){
+    int lseed=1;
+    int seed=(unsigned)time(NULL)+getpid();
+    drandinitialize(3,0,&seed,&lseed,state,&lstate,&info);
+    if(info!=0) {
+      printf("Error initializing random number generator; aborting...\n");
+      exit(-1);
+    }
+    seeded_random=1;
+  }
+  double r;
+  drandgaussian(1,0.,1.0,state,&r,&info);
+  if(info!=0){
+    printf("Error in random number generation; aborting...\n");
+    exit(-1);
+  }
+  return r;
+}
+
+#else
 int have_stored_rand=0;
 double stored_rand;
-int seeded_random=0;//Has random seed been initialised?
 
 inline double random_normal(){
   //Return a random number drawn from a Gaussian distribution with standard deviation 1.0
@@ -145,7 +311,7 @@ inline double random_normal(){
     return x1*sqrtl((-2.0*logl(w))/w);
   }
 }
-
+#endif
 
 ////////////////////
 // CRBM functions //
@@ -181,25 +347,33 @@ void crbm_free(crbm_t *c){
 
 
 void crbm_encode(crbm_t *c,dataset_t *data_in, dataset_t *data_out,double stdev){
+  //Encode data_in using CRBM c; result in data_out. stdev specifies width of Gaussian random number distribution to use (-1 for no randomness)
   int i,j;
   assert(data_in->nrecs==data_out->nrecs);
   assert(data_in->npoints==c->nlv);
   assert(data_out->npoints==c->nlh);
+#pragma omp parallel for if((c->nlh*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i,j) shared(c,data_in,data_out)
   for(i=0;i<c->nlh;i++){
     for(j=0;j<data_in->nrecs;j++){
       *(data_out->data+(i*data_in->nrecs)+j)=*(c->b_v2h+i);
     }
   }
+#ifdef ACML
+  dgemm('N','T',data_in->nrecs,c->nlh,c->nlv,1.0,data_in->data,data_in->nrecs,c->w,c->nlh,1.0,data_out->data,data_in->nrecs);
+#else
   cblas_dgemm(CblasRowMajor,CblasTrans,CblasNoTrans,c->nlh,data_in->nrecs,c->nlv,1.0,c->w,c->nlh,data_in->data,data_in->nrecs,1.0,data_out->data,data_in->nrecs);
+#endif
   memcpy(data_out->weight,data_in->weight,data_in->nrecs*sizeof(double)); //Propagate weights and scales through successive CRBMs
   memcpy(data_out->scale,data_in->scale,data_in->nrecs*sizeof(double));
   if(stdev<0.){
+#pragma omp parallel for if((c->nlh*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i,j) shared(data_in,data_out,c)
     for(i=0;i<c->nlh;i++){
       for(j=0;j<data_in->nrecs;j++){
 	*(data_out->data+(i*data_in->nrecs)+j)=c->loglo+(c->logup-c->loglo)*LOGISTIC(*(c->a_v2h+i)*(*(data_out->data+(i*data_in->nrecs)+j)));
       }
     }
   } else {
+#pragma omp parallel for if((c->nlh*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i,j) shared(data_in,data_out,c)
     for(i=0;i<c->nlh;i++){
       for(j=0;j<data_in->nrecs;j++){
 	*(data_out->data+(i*data_in->nrecs)+j)=c->loglo+(c->logup-c->loglo)*LOGISTIC(*(c->a_v2h+i)*(*(data_out->data+(i*data_in->nrecs)+j)+(stdev*random_normal())));
@@ -210,26 +384,34 @@ void crbm_encode(crbm_t *c,dataset_t *data_in, dataset_t *data_out,double stdev)
 
 
 void crbm_decode(crbm_t *c,dataset_t *data_in, dataset_t *data_out,double stdev){
+  //Decode data_in using c; result in data_out
   int i,j;
   assert(data_in->nrecs==data_out->nrecs);
   assert(data_in->npoints==c->nlh);
   assert(data_out->npoints==c->nlv);
-
+#pragma omp parallel for if((c->nlv*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i,j) shared(c,data_in,data_out)
   for(i=0;i<c->nlv;i++){
     for(j=0;j<data_in->nrecs;j++){
       *(data_out->data+(i*data_in->nrecs)+j)=*(c->b_h2v+i);
     }
   }
+#ifdef ACML
+  dgemm('N','N',data_in->nrecs,c->nlv,c->nlh,1.0,data_in->data,data_in->nrecs,c->w,c->nlh,1.0,data_out->data,data_in->nrecs);
+#else
   cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,c->nlv,data_in->nrecs,c->nlh,1.0,c->w,c->nlh,data_in->data,data_in->nrecs,1.0,data_out->data,data_in->nrecs);
+#endif
   memcpy(data_out->weight,data_in->weight,data_in->nrecs*sizeof(double)); //Propagate weights and scales through successive CRBMs
   memcpy(data_out->scale,data_in->scale,data_in->nrecs*sizeof(double));
+
   if(stdev<0.){
+#pragma omp parallel for if((c->nlv*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i,j) shared(data_in,data_out,c)
     for(i=0;i<c->nlv;i++){
       for(j=0;j<data_in->nrecs;j++){
 	*(data_out->data+(i*data_in->nrecs)+j)=c->loglo+(c->logup-c->loglo)*LOGISTIC(*(c->a_h2v+i)*(*(data_out->data+(i*data_in->nrecs)+j)));
       }
     }
   } else {
+#pragma omp parallel for if((c->nlv*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i,j) shared(data_in,data_out,c)
     for(i=0;i<c->nlv;i++){
       for(j=0;j<data_in->nrecs;j++){
 	*(data_out->data+(i*data_in->nrecs)+j)=c->loglo+(c->logup-c->loglo)*LOGISTIC(*(c->a_h2v+i)*(*(data_out->data+(i*data_in->nrecs)+j)+(stdev*random_normal())));
@@ -238,62 +420,88 @@ void crbm_decode(crbm_t *c,dataset_t *data_in, dataset_t *data_out,double stdev)
   }
 }
 
-void crbm_train(crbm_t *c,dataset_t *data,state_settings_t * settings,FILE *logfp){
+
+void crbm_train(crbm_t *c,dataset_t *data,state_settings_t * settings,FILE *logfp,dataset_t *enc_force){
+  //Train CRBM c using dataset data. Write log data to logfp. If enc_force!=NULL, start of encodings must match those in dataset enc_force.
   dataset_t enc,dec,encdec;
   double *cdata,*cdec;
+  if(enc_force!=NULL){
+    assert(enc_force->nrecs==data->nrecs);
+    assert(enc_force->npoints<=c->nlh);
+  }
   dataset_alloc(&enc,c->nlh,data->nrecs);
   dataset_alloc(&dec,c->nlv,data->nrecs);
   dataset_alloc(&encdec,c->nlh,data->nrecs);
   cdata=malloc(c->nlv*c->nlh*sizeof(double));
   cdec=malloc(c->nlv*c->nlh*sizeof(double));
   if(logfp!=NULL){fprintf(logfp,"# crbm_train >> nrecs=%i niter=%i stdev=%f lrate=%f\n",data->nrecs,settings->niter_crbm,settings->noise_crbm,settings->lrate_crbm);}
-  int iter,i,j,k;
+  int i,j;
+  double scale,denom;
   double wtnorm=0.;
   for(i=0;i<data->nrecs;i++){wtnorm+=*(data->weight+i);}
   while(settings->iter<settings->niter_crbm){
     crbm_encode(c,data,&enc,settings->noise_crbm);
+    if(enc_force!=NULL){
+      memcpy(enc.data,enc_force->data,enc_force->npoints*enc_force->nrecs*sizeof(double));
+    }
     crbm_decode(c,&enc,&dec,settings->noise_crbm);
     crbm_encode(c,&dec,&encdec,settings->noise_crbm);
+    if(enc_force!=NULL){
+      memcpy(encdec.data,enc_force->data,enc_force->npoints*enc_force->nrecs*sizeof(double));
+    }
     printf("CRBM (%i->%i) training iteration %3i :: E=%f\n",c->nlv,c->nlh,settings->iter+1,error_dataset(data,&dec));
     if(logfp!=NULL){fprintf(logfp,"%i %f\n",settings->iter+1,error_dataset(data,&dec));}
+#pragma omp parallel for if((c->nlh*data->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i,j) shared(c,data,enc,wtnorm,encdec)
     for(i=0;i<c->nlh;i++){
       for(j=0;j<data->nrecs;j++){ //Scale encodings by weights so that when we sum over all records (in dgemm) weighting is taken into account
 	*(enc.data+(i*data->nrecs)+j)*=*(data->weight+j)/wtnorm; 
 	*(encdec.data+(i*data->nrecs)+j)*=*(data->weight+j)/wtnorm;
       }
     }
+#ifdef ACML
+    dgemm('T','N',c->nlh,c->nlv,data->nrecs,1.0,enc.data,data->nrecs,data->data,data->nrecs,0.0,cdata,c->nlh);
+    dgemm('T','N',c->nlh,c->nlv,data->nrecs,1.0,encdec.data,data->nrecs,dec.data,data->nrecs,0.0,cdec,c->nlh);
+#else
     cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasTrans,c->nlv,c->nlh,data->nrecs,1.0,data->data,data->nrecs,enc.data,data->nrecs,0.0,cdata,c->nlh);
     cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasTrans,c->nlv,c->nlh,data->nrecs,1.0,dec.data,data->nrecs,encdec.data,data->nrecs,0.0,cdec,c->nlh);
-    double scale=settings->lrate_crbm; //wtnorm implies division by number of traces (or equivalent)
-    for(i=0;i<c->nlv;i++){
-      for(j=0;j<c->nlh;j++){
-	*(c->w+(i*c->nlh)+j)+=scale*(*(cdata+(i*c->nlh)+j)-*(cdec+(i*c->nlh)+j));//Weighting already handled
+#endif
+    scale=settings->lrate_crbm; //wtnorm implies division by number of traces (or equivalent)
+#pragma omp parallel if(((c->nlv*c->nlh)>=MIN_ARRSIZE_PARALLEL)||((c->nlv*data->nrecs)>=MIN_ARRSIZE_PARALLEL)||((c->nlh*data->nrecs)>=MIN_ARRSIZE_PARALLEL)) private(i,j,denom) shared(c,scale,cdata,cdec,enc,encdec,dec,wtnorm)
+    {
+#pragma omp for schedule(static)
+      for(i=0;i<c->nlv;i++){
+	for(j=0;j<c->nlh;j++){
+	  *(c->w+(i*c->nlh)+j)+=scale*(*(cdata+(i*c->nlh)+j)-*(cdec+(i*c->nlh)+j));//Weighting already handled
+	}
+      }
+#pragma omp for schedule(static)
+      for(i=0;i<c->nlh;i++){ 
+	for(j=0;j<data->nrecs;j++){
+	  *(c->b_v2h+i)+=scale*(*(enc.data+(i*data->nrecs)+j)-*(encdec.data+(i*data->nrecs)+j));//Weighting already handled
+	}
+      }
+#pragma omp for schedule(static)
+      for(i=0;i<c->nlv;i++){
+	for(j=0;j<data->nrecs;j++){
+	  *(c->b_h2v+i)+=scale*(*(data->data+(i*data->nrecs)+j)-*(dec.data+(i*data->nrecs)+j))* *(data->weight+j)/wtnorm;
+	}	
+      }
+#pragma omp for schedule(static)
+      for(i=0;i<c->nlh;i++){
+	denom=pow(*(c->a_v2h+i),2.);
+	for(j=0;j<data->nrecs;j++){
+	  *(c->a_v2h+i)+=(scale/denom)*(pow(*(enc.data+(i*data->nrecs)+j),2.)-pow(*(encdec.data+(i*data->nrecs)+j),2.))*wtnorm/ *(data->weight+j);//Avoid double-weighting the squared terms
+	}
+      }
+#pragma omp for schedule(static)
+      for(i=0;i<c->nlv;i++){
+	denom=pow(*(c->a_h2v+i),2.);
+	for(j=0;j<data->nrecs;j++){
+	  *(c->a_h2v+i)+=(scale/denom)*(pow(*(data->data+(i*data->nrecs)+j),2.)-pow(*(dec.data+(i*data->nrecs)+j),2.))* *(data->weight+j)/wtnorm;
+	}
       }
     }
-    for(i=0;i<c->nlh;i++){ 
-      for(j=0;j<data->nrecs;j++){
-	*(c->b_v2h+i)+=scale*(*(enc.data+(i*data->nrecs)+j)-*(encdec.data+(i*data->nrecs)+j));//Weighting already handled
-      }
-    }
-    for(i=0;i<c->nlv;i++){
-      for(j=0;j<data->nrecs;j++){
-	*(c->b_h2v+i)+=scale*(*(data->data+(i*data->nrecs)+j)-*(dec.data+(i*data->nrecs)+j))* *(data->weight+j)/wtnorm;
-      }	
-    }
-
-    double denom;
-    for(i=0;i<c->nlh;i++){
-      denom=pow(*(c->a_v2h+i),2.);
-      for(j=0;j<data->nrecs;j++){
-	*(c->a_v2h+i)+=(scale/denom)*(pow(*(enc.data+(i*data->nrecs)+j),2.)-pow(*(encdec.data+(i*data->nrecs)+j),2.))*wtnorm/ *(data->weight+j);//Avoid double-weighting the squared terms
-      }
-    }
-    for(i=0;i<c->nlv;i++){
-      denom=pow(*(c->a_h2v+i),2.);
-       for(j=0;j<data->nrecs;j++){
-	 *(c->a_h2v+i)+=(scale/denom)*(pow(*(data->data+(i*data->nrecs)+j),2.)-pow(*(dec.data+(i*data->nrecs)+j),2.))* *(data->weight+j)/wtnorm;
-      }
-    }
+    
     settings->iter++;
     if(cease_training){
       FILE * fp=fopen("crbm.dump","w");
@@ -307,6 +515,7 @@ void crbm_train(crbm_t *c,dataset_t *data,state_settings_t * settings,FILE *logf
       exit(0);
     }
   }
+  
   dataset_free(&enc);
   dataset_free(&dec);
   dataset_free(&encdec);
@@ -315,6 +524,7 @@ void crbm_train(crbm_t *c,dataset_t *data,state_settings_t * settings,FILE *logf
 }
 
 void write_crbm(FILE *fp,crbm_t *c){
+  //Write crbm structure to file
   fwrite(&(c->nlv),sizeof(int),1,fp);
   fwrite(&(c->nlh),sizeof(int),1,fp);
   fwrite(c->w,sizeof(double),c->nlv*c->nlh,fp);
@@ -327,6 +537,7 @@ void write_crbm(FILE *fp,crbm_t *c){
 }
 
 void save_crbm(char *filename, crbm_t *c){
+  //Write crbm structure to named file
   FILE *fp=fopen(filename,"w");
   fseek(fp,0,SEEK_SET);
   write_crbm(fp,c);
@@ -335,6 +546,7 @@ void save_crbm(char *filename, crbm_t *c){
 
 
 crbm_t read_crbm(FILE *fp){
+  //Read crbm structure from file
   crbm_t c;
   int nlv,nlh;
   fread(&nlv,sizeof(int),1,fp);
@@ -357,6 +569,7 @@ crbm_t read_crbm(FILE *fp){
 }
 
 crbm_t load_crbm(char *filename){
+  //Read crbm structure from named file
   FILE *fp=fopen(filename,"r");
   fseek(fp,0,SEEK_SET);
   crbm_t c=read_crbm(fp);
@@ -369,6 +582,7 @@ crbm_t load_crbm(char *filename){
 // Autoencoder functions //
 ///////////////////////////
 autoenc_t * make_autoencoder(int ncrbms,crbm_t *crbms,FILE *logfp){
+  //Assemble autoencoder from collection of crbms
   autoenc_t * myauto=malloc(sizeof(autoenc_t)+2*ncrbms*sizeof(layer_t));
   myauto->nlayers=2*ncrbms;
   int i,j,k;
@@ -384,6 +598,7 @@ autoenc_t * make_autoencoder(int ncrbms,crbm_t *crbms,FILE *logfp){
     myauto->layers[i].loglo=(crbms+i)->loglo;
     myauto->layers[i].logup=(crbms+i)->logup;
     myauto->layers[i].w=malloc((crbms+i)->nlv * (crbms+i)->nlh*sizeof(double));
+#pragma omp parallel for if(((crbms+i)->nlh*(crbms+i)->nlv)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(myauto,crbms,i) 
     for(j=0;j<(crbms+i)->nlh;j++){
       for(k=0;k<(crbms+i)->nlv;k++){
 	*(myauto->layers[i].w+(j*(crbms+i)->nlv)+k)=*((crbms+i)->w+(k*(crbms+i)->nlh)+j);
@@ -418,6 +633,7 @@ autoenc_t * make_autoencoder(int ncrbms,crbm_t *crbms,FILE *logfp){
 }
 
 void write_autoencoder(FILE *fp,autoenc_t *a){
+  //Write autoencoder structure to file
   fwrite(&(a->nlayers),sizeof(int),1,fp);
   int i;
   for(i=0;i<a->nlayers;i++){
@@ -432,6 +648,7 @@ void write_autoencoder(FILE *fp,autoenc_t *a){
 }
 
 void save_autoencoder(char *filename,autoenc_t *a){
+  //Write autoencoder structure to named file
   FILE *fp=fopen(filename,"w");
   fseek(fp,0,SEEK_SET);
   write_autoencoder(fp,a);
@@ -439,6 +656,7 @@ void save_autoencoder(char *filename,autoenc_t *a){
 }
 
 autoenc_t *read_autoencoder(FILE *fp){
+  //Read autoencoder from file
   //Assume that fp is correctly positioned...
   int nlayers;
   autoenc_t *a;
@@ -462,6 +680,7 @@ autoenc_t *read_autoencoder(FILE *fp){
 }
 
 autoenc_t *load_autoencoder(char *filename){
+  //Read autoencoder from named file
   FILE *fp=fopen(filename,"r");
   fseek(fp,0,SEEK_SET);
   autoenc_t *a=read_autoencoder(fp);
@@ -470,6 +689,7 @@ autoenc_t *load_autoencoder(char *filename){
 }
 
 void autoencoder_free(autoenc_t *a){
+  //free memory used by autoencoder
   int i;
   for(i=0;i<a->nlayers;i++){
     free(a->layers[i].w);
@@ -479,6 +699,7 @@ void autoencoder_free(autoenc_t *a){
 }
 
 void autoencoder_encode(autoenc_t *a,dataset_t *data_in,dataset_t *data_out){
+  //Encode data_in using autoencoder
   assert(data_in->npoints==a->layers[0].nin);
   assert(data_out->npoints==a->layers[a->nlayers/2 -1].nout);
   assert(data_in->nrecs==data_out->nrecs);
@@ -489,12 +710,18 @@ void autoencoder_encode(autoenc_t *a,dataset_t *data_in,dataset_t *data_out){
   memcpy(layer_in,data_in->data,a->layers[0].nin*data_in->nrecs*sizeof(double));
   for(i=0;i<a->nlayers/2;i++){
     layer_out=malloc(a->layers[i].nout*data_in->nrecs*sizeof(double));
+#pragma omp parallel for if((a->layers[i].nout*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(data_in,layer_out,i,a)
     for(j=0;j<a->layers[i].nout;j++){
       for(k=0;k<data_in->nrecs;k++){
 	*(layer_out+(j*data_in->nrecs)+k)=*(a->layers[i].b+j);
       }
     }
+#ifdef ACML
+    dgemm('N','N',data_in->nrecs,a->layers[i].nout,a->layers[i].nin,1.0,layer_in,data_in->nrecs,a->layers[i].w,a->layers[i].nin,1.0,layer_out,data_in->nrecs);
+#else
     cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,a->layers[i].nout,data_in->nrecs,a->layers[i].nin,1.0,a->layers[i].w,a->layers[i].nin,layer_in,data_in->nrecs,1.0,layer_out,data_in->nrecs);
+#endif
+#pragma omp parallel for if((a->layers[i].nout*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(layer_out,data_in,a,i)
     for(j=0;j<a->layers[i].nout;j++){
       for(k=0;k<data_in->nrecs;k++){
 	*(layer_out+(j*data_in->nrecs)+k)=a->layers[i].loglo+(a->layers[i].logup-a->layers[i].loglo)*LOGISTIC(*(layer_out+(j*data_in->nrecs)+k)* *(a->layers[i].a+j));
@@ -512,6 +739,7 @@ void autoencoder_encode(autoenc_t *a,dataset_t *data_in,dataset_t *data_out){
 } 
   
 void autoencoder_decode(autoenc_t *a,dataset_t *data_in, dataset_t *data_out){
+  //Decode data_in using autoencoder
   assert(data_out->npoints==a->layers[0].nin);
   assert(data_in->npoints==a->layers[a->nlayers/2 -1].nout);
   assert(data_in->nrecs==data_out->nrecs);
@@ -523,12 +751,18 @@ void autoencoder_decode(autoenc_t *a,dataset_t *data_in, dataset_t *data_out){
   memcpy(layer_in,data_in->data,a->layers[a->nlayers/2].nin*data_in->nrecs*sizeof(double));
   for(i=a->nlayers/2;i<a->nlayers;i++){
     layer_out=malloc(a->layers[i].nout*data_in->nrecs*sizeof(double));
+#pragma omp parallel for if((a->layers[i].nout*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(data_in,layer_out,i,a)
     for(j=0;j<a->layers[i].nout;j++){
       for(k=0;k<data_in->nrecs;k++){
 	*(layer_out+(j*data_in->nrecs)+k)=*(a->layers[i].b+j);
       }
     }
+#ifdef ACML
+    dgemm('N','N',data_in->nrecs,a->layers[i].nout,a->layers[i].nin,1.0,layer_in,data_in->nrecs,a->layers[i].w,a->layers[i].nin,1.0,layer_out,data_in->nrecs);
+#else
     cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,a->layers[i].nout,data_in->nrecs,a->layers[i].nin,1.0,a->layers[i].w,a->layers[i].nin,layer_in,data_in->nrecs,1.0,layer_out,data_in->nrecs);
+#endif
+#pragma omp parallel for if((a->layers[i].nout*data_in->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(layer_out,data_in,a,i)
     for(j=0;j<a->layers[i].nout;j++){
       for(k=0;k<data_in->nrecs;k++){
 	*(layer_out+(j*data_in->nrecs)+k)=a->layers[i].loglo+(a->layers[i].logup-a->layers[i].loglo)*LOGISTIC(*(layer_out+(j*data_in->nrecs)+k)* *(a->layers[i].a+j));
@@ -545,27 +779,33 @@ void autoencoder_decode(autoenc_t *a,dataset_t *data_in, dataset_t *data_out){
 }
 
 void autoencoder_encdec(autoenc_t *a,node_val_t *nodevals,int nrecs){
+  //Propagate information through autoencoder network, storing both node values and their derivatives in structure 'nodevals'
   //Assume that nodevals[0] is already populated...
   int i,j,k;
   for(i=1;i<a->nlayers+1;i++){
+#pragma omp parallel for if(((nodevals+i)->n*nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(nodevals,i,a,nrecs)
     for(j=0;j<(nodevals+i)->n;j++){
       for(k=0;k<nrecs;k++){
 	*(((nodevals+i)->values)+(j*nrecs)+k)=*((a->layers[i-1].b)+j);
       }
     }
+#ifdef ACML
+    dgemm('N','N',nrecs,(nodevals+i)->n,(nodevals+i-1)->n,1.0,(nodevals+i-1)->values,nrecs,a->layers[i-1].w,(nodevals+i-1)->n,1.0,(nodevals+i)->values,nrecs);
+#else
     cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,(nodevals+i)->n,nrecs,(nodevals+i-1)->n,1.0,a->layers[i-1].w,(nodevals+i-1)->n,(nodevals+i-1)->values,nrecs,1.0,(nodevals+i)->values,nrecs);
+#endif
+#pragma omp parallel for if(((nodevals+i)->n*nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(nodevals,nrecs,a,i)
     for(j=0;j<(nodevals+i)->n;j++){
       for(k=0;k<nrecs;k++){
 	*((nodevals+i)->values+(j*nrecs)+k)=a->layers[i-1].loglo+(a->layers[i-1].logup-a->layers[i-1].loglo)*(LOGISTIC(*((nodevals+i)->values+(j*nrecs)+k)* *(a->layers[i-1].a+j)));
 	*((nodevals+i)->derivs+(j*nrecs)+k)=(*((nodevals+i)->values+(j*nrecs)+k)-a->layers[i-1].loglo)*(a->layers[i-1].logup-*((nodevals+i)->values+(j*nrecs)+k))/(a->layers[i-1].logup-a->layers[i-1].loglo);
       }
-    }
+    } 
   }
 }
 
-void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *settings,dataset_t *monitor,FILE *logfp){
-  //Main training routine
-
+void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *settings,dataset_t *monitor,FILE *logfp,dataset_t *enc_force){
+  //Main training routine. Read the paper...
   //Write log file if required
   if(logfp!=NULL){
     if(monitor==NULL){
@@ -574,27 +814,35 @@ void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *setti
       fprintf(logfp,"# nrecs=%i niter=%i stdev=%f lrate=%f nrecs_mon=%i\n",data->nrecs,settings->niter_auto,settings->noise_auto,settings->lrate_auto,monitor->nrecs);
     }
   }
-
+  
   //Set up structure to hold values of each neuron within network
   node_val_t nodes[a->nlayers+1];
   make_nodevals(a,nodes,data->nrecs);
   int i,j,k;
-
+  
   //Set up structure for back-propagation of errors
   double *delta[a->nlayers+1];
   for(i=1;i<a->nlayers+1;i++){
     delta[i]=malloc(a->layers[i-1].nout*data->nrecs*sizeof(double));
   }
-
-  //Set up structure for back-propagation of cost term
+  
+  //Set up structure for back-propagation of cost term if required
   double *cost[a->nlayers/2+1];
   if(settings->costwt>0.){
     for(i=1;i<a->nlayers/2+1;i++){
       cost[i]=malloc(a->layers[i-1].nout*data->nrecs*sizeof(double));
     }
   }
-    
-
+  
+  //Set up structure for back-propagation of enc-force term if required
+  double *gamma[a->nlayers/2+1];
+  if(enc_force!=NULL){
+    for(i=1;i<a->nlayers/2+1;i++){
+      gamma[i]=malloc(a->layers[i-1].nout*data->nrecs*sizeof(double)); //top-level gamma is oversize
+    }
+  }
+  
+  
   //Set up to handle monitoring dataset if required
   dataset_t mon_enc,mon_dec;
   double olderr,err;
@@ -615,13 +863,14 @@ void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *setti
     free(tmp);
     printf("Base error for monitor dataset: %f\n",mon_base);
   }
-
+  
+  //Initialise adaptive learning rate
   settings->N_reduced=0;
   settings->i_red_sum=0;
   settings->iter_reset=0;
   int n_increasing=0;
   double eta;
-
+  
   //Main training loop
   while(settings->iter<settings->niter_auto && cease_training==0){
     //Evaluate encoding/reconstruction of dataset for current weights
@@ -631,9 +880,13 @@ void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *setti
     //Compute reconstruction error
     if(settings->iter>0){olderr=err;}
     err=error_array(nodes[0].values,nodes[a->nlayers].values,nodes[0].n,data->nrecs,data->weight);
+    if(enc_force!=NULL){
+      err+=settings->enc_force_weight*error_array(enc_force->data,nodes[a->nlayers/2].values,enc_force->npoints,data->nrecs,data->weight);
+    }
     //Compute average encoding length
     double lenc=len_enc_array(nodes[a->nlayers/2].values,nodes[a->nlayers/2].n,data->nrecs,data->weight);
-    //Learning rate is adaptive to handle instabilities etc.
+    //Learning rate is adaptive to handle instabilities etc. This is a bit of a mess, probably needs a rewrite/rethink.
+    //See paper for description of what's (supposed to be) happening
     if(settings->iter==0){
       settings->i_adapt_rate=0;
     } else {
@@ -663,7 +916,7 @@ void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *setti
     }
     //Final learning rate for this iteration:
     eta=settings->eta0+settings->i_adapt_rate*(settings->lrate_auto-settings->eta0)/settings->N_adapt_rate;
-
+    
     double mon_err;
     //Compute reconstruction error for monitor dataset if reqd, write progress to file
     if(monitor!=NULL){
@@ -676,38 +929,94 @@ void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *setti
       printf("Autoencoder training iteration %4i :: E=%.5f (%.3f%%) L=%.3f\n",settings->iter+1,err,err*100./err_base,lenc);
       if(logfp!=NULL){fprintf(logfp,"%i %f %f\n",eta,settings->iter+1,err);}
     }
-
+    
     //Back-propagate errors
-    for(i=0;i<(data->nrecs*nodes[0].n);i++){*(delta[a->nlayers]+i)=*(nodes[a->nlayers].values+i)- *(nodes[0].values+i);}
+#pragma omp parallel for if((data->nrecs*nodes[0].n)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i) shared(delta,nodes,a)
+    for(i=0;i<(data->nrecs*nodes[0].n);i++){
+      *(delta[a->nlayers]+i)=*(nodes[a->nlayers].values+i)- *(nodes[0].values+i);
+    }
     double *tmp;
     for(i=a->nlayers-1;i>0;i--){
       tmp=malloc(nodes[i+1].n*data->nrecs*sizeof(double));
+#pragma omp parallel for if((nodes[i+1].n*data->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(tmp,data,delta,i,nodes)
       for(j=0;j<nodes[i+1].n;j++){
 	for(k=0;k<data->nrecs;k++){
 	  *(tmp+(j*data->nrecs)+k)=*(delta[i+1]+(j*data->nrecs)+k)* *(nodes[i+1].derivs+(j*data->nrecs)+k) * *(a->layers[i].a+j);
 	}
       }
+#ifdef ACML
+      dgemm('N','T',data->nrecs,nodes[i].n,nodes[i+1].n,1.0,tmp,data->nrecs,a->layers[i].w,nodes[i].n,0.0,delta[i],data->nrecs);
+#else
       cblas_dgemm(CblasRowMajor,CblasTrans,CblasNoTrans,nodes[i].n,data->nrecs,nodes[i+1].n,1.0,a->layers[i].w,nodes[i].n,tmp,data->nrecs,0.0,delta[i],data->nrecs);
+#endif
       free(tmp);
     }
-    if(settings->costwt>0.){
-      //Back-propagate cost term
-      //printf("%i\n",nodes[a->nlayers/2].n);
-      //for(i=0;i<(data->nrecs*nodes[a->nlayers/2].n);i++){*(cost[a->nlayers/2]+i)=*(nodes[a->nlayers/2].values+i);}
-      for(i=0;i<(data->nrecs*nodes[a->nlayers/2].n);i++){*(cost[a->nlayers/2]+i)=copysign(1.0,*(nodes[a->nlayers/2].values+i));}
-      //printf("A\n");
+    if(enc_force!=NULL){
+      //Also back-propagate errors from the encoding stage
+#pragma omp parallel for if((data->nrecs*nodes[a->nlayers/2].n)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i) shared(gamma,a,nodes,enc_force)
+      for(i=0;i<(data->nrecs*nodes[a->nlayers/2].n);i++){
+	if(i<(data->nrecs*enc_force->npoints)){
+	    *(gamma[a->nlayers/2]+i)=*(nodes[a->nlayers/2].values+i)- *(enc_force->data+i);
+	  } else {
+	    *(gamma[a->nlayers/2]+i)=0.;
+	  }
+      }
+      
+      double *tmp;
       for(i=a->nlayers/2-1;i>0;i--){
 	tmp=malloc(nodes[i+1].n*data->nrecs*sizeof(double));
+#pragma omp parallel for if((nodes[i+1].n*data->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(tmp,data,gamma,nodes,a)
+	for(j=0;j<nodes[i+1].n;j++){
+	  for(k=0;k<data->nrecs;k++){
+	    *(tmp+(j*data->nrecs)+k)=*(gamma[i+1]+(j*data->nrecs)+k)* *(nodes[i+1].derivs+(j*data->nrecs)+k) * *(a->layers[i].a+j);
+	  }
+	}
+#ifdef ACML
+	dgemm('N','T',data->nrecs,nodes[i].n,nodes[i+1].n,1.0,tmp,data->nrecs,a->layers[i].w,nodes[i].n,0.0,gamma[i],data->nrecs);
+#else
+	cblas_dgemm(CblasRowMajor,CblasTrans,CblasNoTrans,nodes[i].n,data->nrecs,nodes[i+1].n,1.0,a->layers[i].w,nodes[i].n,tmp,data->nrecs,0.0,gamma[i],data->nrecs);
+#endif
+	free(tmp);
+      }
+    }
+    if(settings->costwt>0.){
+	//Back-propagate cost term
+#pragma omp parallel for if((nodes[a->nlayers/2].n*data->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(i) shared(cost,a,nodes)
+      for(i=0;i<(data->nrecs*nodes[a->nlayers/2].n);i++){
+	if(enc_force!=NULL && i<(data->nrecs*enc_force->npoints)){ 
+	  *(cost[a->nlayers/2]+i)=0.;
+	} else {
+	  *(cost[a->nlayers/2]+i)=copysign(1.0,*(nodes[a->nlayers/2].values+i));
+	}
+      }
+      for(i=a->nlayers/2-1;i>0;i--){
+	tmp=malloc(nodes[i+1].n*data->nrecs*sizeof(double));
+#pragma omp parallel for if((nodes[i+1].n*data->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(nodes,data,tmp,cost,i,a)
 	for(j=0;j<nodes[i+1].n;j++){
 	  for(k=0;k<data->nrecs;k++){
 	    *(tmp+(j*data->nrecs)+k)=*(cost[i+1]+(j*data->nrecs)+k)* *(nodes[i+1].derivs+(j*data->nrecs)+k) * *(a->layers[i].a+j);
 	  }
 	}
+#ifdef ACML
+	dgemm('N','T',data->nrecs,nodes[i].n,nodes[i+1].n,1.0,tmp,data->nrecs,a->layers[i].w,nodes[i].n,0.0,cost[i],data->nrecs);
+#else
 	cblas_dgemm(CblasRowMajor,CblasTrans,CblasNoTrans,nodes[i].n,data->nrecs,nodes[i+1].n,1.0,a->layers[i].w,nodes[i].n,tmp,data->nrecs,0.0,cost[i],data->nrecs);
+#endif
 	free(tmp);
       }
-      //printf("B\n");
     }
+    if(enc_force!=NULL){
+      //delta -> delta + (phi . gamma)
+      for(i=1;i<a->nlayers/2;i++){
+#pragma omp parallel for if((nodes[i+1].n*data->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(data,delta,settings,gamma,i)
+	for(j=0;j<nodes[i+1].n;j++){
+	  for(k=0;k<data->nrecs;k++){
+	    *(delta[i]+(j*data->nrecs)+k)+=settings->enc_force_weight* *(gamma[i]+(j*data->nrecs)+k);
+	  }
+	}
+      }
+    }
+    
 
     //Compute weight updates from backpropagated errors
     double *dw,*da,*db,*work;
@@ -717,80 +1026,123 @@ void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *setti
       db=calloc(a->layers[i-1].nout,sizeof(double));
       work=malloc(a->layers[i-1].nout*data->nrecs*sizeof(double));
       memcpy(work,delta[i],a->layers[i-1].nout*data->nrecs*sizeof(double));
-      for(j=0;j<a->layers[i-1].nout;j++){
-	for(k=0;k<data->nrecs;k++){
-	  *(work+(j*data->nrecs)+k)*=*(nodes[i].derivs+(j*data->nrecs)+k)* *(a->layers[i-1].a+j)* *(data->weight+k)/wtnorm;
-	}
-      }
-      for(j=0;j<a->layers[i-1].nout;j++){
-	*(db+j)=*(work+(j*data->nrecs));
-	for(k=1;k<data->nrecs;k++){
-	  *(db+j)+=*(work+(j*data->nrecs)+k);
-	}
-      }
-      cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasTrans,a->layers[i-1].nout,a->layers[i-1].nin,data->nrecs,1.0,work,data->nrecs,nodes[i-1].values,data->nrecs,0.0,dw,a->layers[i-1].nin);
-      
-      for(j=0;j<a->layers[i-1].nout;j++){
-	for(k=0;k<data->nrecs;k++){
-	  *(work+(j*data->nrecs)+k)=*(a->layers[i-1].b+j);
-	}
-      }
-      cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,a->layers[i-1].nout,data->nrecs,a->layers[i-1].nin,1.0,a->layers[i-1].w,a->layers[i-1].nin,nodes[i-1].values,data->nrecs,1.0,work,data->nrecs);
-      for(j=0;j<(a->layers[i-1].nout*data->nrecs);j++){
-	*(work+j)*=*(delta[i]+j)* *(nodes[i].derivs+j);
-      }
-      for(j=0;j<a->layers[i-1].nout;j++){
-	*(da+j)=*(work+(j*data->nrecs))* *(data->weight)/wtnorm;
-	for(k=1;k<data->nrecs;k++){
-	  *(da+j)+=*(work+(j*data->nrecs)+k)* *(data->weight+k)/wtnorm;
-	}
-      }
-
-      if(settings->costwt>0. && i<=a->nlayers/2){
-	//printf("%i\n",a->layers[i-1].nout);
-	//printf("C\n");
-	memcpy(work,cost[i],a->layers[i-1].nout*data->nrecs*sizeof(double));
-	//printf("D\n");
+#pragma omp parallel if((a->layers[i-1].nout*data->nrecs)>=MIN_ARRSIZE_PARALLEL) private(j,k) shared(a,data,work,i,nodes,wtnorm,db)
+      {
+#pragma omp for schedule(static)
 	for(j=0;j<a->layers[i-1].nout;j++){
 	  for(k=0;k<data->nrecs;k++){
 	    *(work+(j*data->nrecs)+k)*=*(nodes[i].derivs+(j*data->nrecs)+k)* *(a->layers[i-1].a+j)* *(data->weight+k)/wtnorm;
 	  }
 	}
-	//printf("E\n");
+#pragma omp for schedule(static)
 	for(j=0;j<a->layers[i-1].nout;j++){
-	  for(k=0;k<data->nrecs;k++){
-	    *(db+j)+=*(work+(j*data->nrecs)+k)*settings->costwt;
+	  *(db+j)=*(work+(j*data->nrecs));
+	  for(k=1;k<data->nrecs;k++){
+	    *(db+j)+=*(work+(j*data->nrecs)+k);
 	  }
 	}
-	//printf("F\n");
-	//Update dw - note funny scaling to accommodate costwt within dgemm call
-	cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasTrans,a->layers[i-1].nout,a->layers[i-1].nin,data->nrecs,1.0,work,data->nrecs,nodes[i-1].values,data->nrecs,1.0/settings->costwt,dw,a->layers[i-1].nin);
-	for(j=0;j<a->layers[i-1].nin*a->layers[i-1].nout;j++){*(dw+j)=settings->costwt* *(dw+j);}
-	
-	for(j=0;j<a->layers[i-1].nout;j++){
-	  for(k=0;k<data->nrecs;k++){
-	    *(work+(j*data->nrecs)+k)=*(a->layers[i-1].b+j);
-	  }
+      }
+#ifdef ACML
+      dgemm('T','N',a->layers[i-1].nin,a->layers[i-1].nout,data->nrecs,1.0,nodes[i-1].values,data->nrecs,work,data->nrecs,0.0,dw,a->layers[i-1].nin);
+#else
+      cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasTrans,a->layers[i-1].nout,a->layers[i-1].nin,data->nrecs,1.0,work,data->nrecs,nodes[i-1].values,data->nrecs,0.0,dw,a->layers[i-1].nin);
+#endif 
+#pragma omp parallel for if((a->layers[i-1].nout*data->nrecs)>=MIN_ARRSIZE_PARALLEL) schedule(static) private(j,k) shared(a,data,work,i)
+      for(j=0;j<a->layers[i-1].nout;j++){
+	for(k=0;k<data->nrecs;k++){
+	  *(work+(j*data->nrecs)+k)=*(a->layers[i-1].b+j);
 	}
-	cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,a->layers[i-1].nout,data->nrecs,a->layers[i-1].nin,1.0,a->layers[i-1].w,a->layers[i-1].nin,nodes[i-1].values,data->nrecs,1.0,work,data->nrecs);
+      }
+#ifdef ACML
+      dgemm('N','N',data->nrecs,a->layers[i-1].nout,a->layers[i-1].nin,1.0,nodes[i-1].values,data->nrecs,a->layers[i-1].w,a->layers[i-1].nin,1.0,work,data->nrecs);
+#else
+      cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,a->layers[i-1].nout,data->nrecs,a->layers[i-1].nin,1.0,a->layers[i-1].w,a->layers[i-1].nin,nodes[i-1].values,data->nrecs,1.0,work,data->nrecs);
+#endif
+#pragma omp parallel if((a->layers[i-1].nout*data->nrecs)>MIN_ARRSIZE_PARALLEL) private(j,k) shared(work,delta,nodes,a,data,da,wtnorm)
+      {
+#pragma omp for schedule(static)
 	for(j=0;j<(a->layers[i-1].nout*data->nrecs);j++){
-	  *(work+j)*=*(cost[i]+j)* *(nodes[i].derivs+j);
+	  *(work+j)*=*(delta[i]+j)* *(nodes[i].derivs+j);
 	}
+#pragma omp for schedule(static)
 	for(j=0;j<a->layers[i-1].nout;j++){
-	  for(k=0;k<data->nrecs;k++){
-	    *(da+j)+=*(work+(j*data->nrecs)+k)*settings->costwt* *(data->weight+k)/wtnorm;
+	  *(da+j)=*(work+(j*data->nrecs))* *(data->weight)/wtnorm;
+	  for(k=1;k<data->nrecs;k++){
+	    *(da+j)+=*(work+(j*data->nrecs)+k)* *(data->weight+k)/wtnorm;
+	  }
+	}
+      }
+      if(settings->costwt>0. && i<=a->nlayers/2){
+	memcpy(work,cost[i],a->layers[i-1].nout*data->nrecs*sizeof(double));
+#pragma omp parallel if((a->layers[i-1].nout*data->nrecs)>MIN_ARRSIZE_PARALLEL) private(j,k) shared(a,data,work,nodes,wtnorm,db,settings)
+	{
+#pragma omp for schedule(static)
+	  for(j=0;j<a->layers[i-1].nout;j++){
+	    for(k=0;k<data->nrecs;k++){
+	      *(work+(j*data->nrecs)+k)*=*(nodes[i].derivs+(j*data->nrecs)+k)* *(a->layers[i-1].a+j)* *(data->weight+k)/wtnorm;
+	    }
+	  }
+#pragma omp for schedule(static)
+	  for(j=0;j<a->layers[i-1].nout;j++){
+	    for(k=0;k<data->nrecs;k++){
+	      *(db+j)+=*(work+(j*data->nrecs)+k)*settings->costwt;
+	    }
+	  }
+	}
+	//Update dw - note funny scaling to accommodate costwt within dgemm call
+#ifdef ACML
+	dgemm('T','N',a->layers[i-1].nin,a->layers[i-1].nout,data->nrecs,1.0,nodes[i-1].values,data->nrecs,work,data->nrecs,1.0/settings->costwt,dw,a->layers[i-1].nin);
+#else
+	cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasTrans,a->layers[i-1].nout,a->layers[i-1].nin,data->nrecs,1.0,work,data->nrecs,nodes[i-1].values,data->nrecs,1.0/settings->costwt,dw,a->layers[i-1].nin);
+#endif
+
+#pragma omp parallel if ((a->layers[i-1].nin*a->layers[i-1].nout)>=MIN_ARRSIZE_PARALLEL) private(j,k) shared(a,dw,settings,work,data,i)
+	{
+#pragma omp for schedule(static)
+	  for(j=0;j<a->layers[i-1].nin*a->layers[i-1].nout;j++){
+	    *(dw+j)=settings->costwt* *(dw+j);
+	  }
+#pragma omp for schedule(static)
+	  for(j=0;j<a->layers[i-1].nout;j++){
+	    for(k=0;k<data->nrecs;k++){
+	      *(work+(j*data->nrecs)+k)=*(a->layers[i-1].b+j);
+	    }
+	  }
+	}
+#ifdef ACML
+	dgemm('N','N',data->nrecs,a->layers[i-1].nout,a->layers[i-1].nin,1.0,nodes[i-1].values,data->nrecs,a->layers[i-1].w,a->layers[i-1].nin,1.0,work,data->nrecs);
+#else
+	cblas_dgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,a->layers[i-1].nout,data->nrecs,a->layers[i-1].nin,1.0,a->layers[i-1].w,a->layers[i-1].nin,nodes[i-1].values,data->nrecs,1.0,work,data->nrecs);
+#endif
+#pragma omp parallel if((a->layers[i-1].nout*data->nrecs)>=MIN_ARRSIZE_PARALLEL) private(j,k) shared(i,a,work,cost,nodes,da,data,settings,wtnorm)
+	{
+#pragma omp for schedule(static)
+	  for(j=0;j<(a->layers[i-1].nout*data->nrecs);j++){
+	    *(work+j)*=*(cost[i]+j)* *(nodes[i].derivs+j);
+	  }
+#pragma omp for schedule(static)	 
+	  for(j=0;j<a->layers[i-1].nout;j++){
+	    for(k=0;k<data->nrecs;k++){
+	      *(da+j)+=*(work+(j*data->nrecs)+k)*settings->costwt* *(data->weight+k)/wtnorm;
+	    }
 	  }
 	}
       }
       free(work);
-      for(j=0;j<a->layers[i-1].nin*a->layers[i-1].nout;j++){
-	*(a->layers[i-1].w+j)-=eta* *(dw+j);
-      }
-      for(j=0;j<a->layers[i-1].nout;j++){
-	*(a->layers[i-1].a+j)-=eta* *(da+j);
-      }
-      for(j=0;j<a->layers[i-1].nout;j++){
-	*(a->layers[i-1].b+j)-=eta* *(db+j);
+#pragma omp parallel if((a->layers[i-1].nin*a->layers[i-1].nout)>=MIN_ARRSIZE_PARALLEL) private(j) shared(a,eta,dw,da,db,i)
+      {
+#pragma omp for schedule(static)
+	for(j=0;j<a->layers[i-1].nin*a->layers[i-1].nout;j++){
+	  *(a->layers[i-1].w+j)-=eta* *(dw+j);
+	}
+#pragma omp for schedule(static)
+	for(j=0;j<a->layers[i-1].nout;j++){
+	  *(a->layers[i-1].a+j)-=eta* *(da+j);
+	}
+#pragma omp for schedule(static)
+	for(j=0;j<a->layers[i-1].nout;j++){
+	  *(a->layers[i-1].b+j)-=eta* *(db+j);
+	}
       }
       free(dw);
       free(da);
@@ -812,6 +1164,11 @@ void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *setti
       free(cost[i]);
     }
   }
+  if(enc_force!=NULL){
+    for(i=1;i<a->nlayers/2+1;i++){
+      free(gamma[i]);
+    }
+  }
   nodevals_free(a,nodes);
 }
 
@@ -819,6 +1176,7 @@ void autoencoder_batchtrain(autoenc_t *a,dataset_t *data,state_settings_t *setti
 // Miscellaneous functions //
 /////////////////////////////	
 void make_nodevals(autoenc_t *a,node_val_t *nodevals,int nrecs){
+  //Allocate memory for nodevals structure
   int i;
   for(i=0;i<a->nlayers;i++){
     (nodevals+i)->n=a->layers[i].nin;
@@ -839,10 +1197,13 @@ void nodevals_free(autoenc_t *a, node_val_t *nodevals){
 }
 
 double error_dataset(dataset_t *d1,dataset_t *d2){
+  //Compute mean-squared error for entire dataset
   int i,j;
   double e=0.0;
   double wtnorm=0.;
+
   for(i=0;i<d1->nrecs;i++){wtnorm+=*(d1->weight+i);}
+#pragma omp parallel for if((d1->npoints*d1->nrecs)>=MIN_ARRSIZE_PARALLEL) reduction(+:e) private(i,j) shared(d1,d2,wtnorm)
   for(i=0;i<d1->npoints;i++){
     for(j=0;j<d1->nrecs;j++){
       e+=*(d1->weight+j)*pow(*(d1->data+(i*d1->nrecs)+j)-*(d2->data+(i*d1->nrecs)+j),2.)/wtnorm;
@@ -856,6 +1217,7 @@ double error_array(double *d1,double *d2,int npoints,int nrecs, double *weights)
   double e=0.0;
   double wtnorm=0.;
   for(i=0;i<nrecs;i++){wtnorm+=*(weights+i);}
+#pragma omp parallel for if((npoints*nrecs)>=MIN_ARRSIZE_PARALLEL) reduction(+:e) private(i,j) shared(weights,d1,d2,nrecs,wtnorm)
   for(i=0;i<npoints;i++){
     for(j=0;j<nrecs;j++){
       e+=*(weights+j)*pow(*(d1+(i*nrecs)+j)-*(d2+(i*nrecs)+j),2.)/wtnorm;
@@ -882,12 +1244,14 @@ double len_enc_array(double *d1,int npoints,int nrecs, double *weights){
 }
 
 void abort_handler(int signum){
+  //signal(signum,SIG_DFL); //Try to avoid infinite loops...
   printf("Training interupted by SIGINT. Options:\n(r)esume training\n(c)omplete current iteration, save network and exit normally\n(a)bort\n\nPlease press r, c or a...");
-  char resp='\0';
+  char resp[80]="";
+  strncpy(resp," ",80);
   int loop=1;
   while(loop){
-    scanf("%c",&resp);
-    switch(resp){
+    scanf("%s",resp);
+    switch(resp[0]){
     case 'a': 
       exit(-1);
       loop=0;
@@ -927,6 +1291,9 @@ void write_state(char * filename,state_settings_t settings,char * storefile){
   if(settings.monitorfile==NULL){lstr=0;} else {lstr=strlen(settings.monitorfile);}
   fwrite(&lstr,sizeof(int),1,fp);
   if(lstr>0){fwrite(settings.monitorfile,sizeof(char),lstr,fp);}
+  if(settings.force_file==NULL){lstr=0;} else {lstr=strlen(settings.force_file);}
+  fwrite(&lstr,sizeof(int),1,fp);
+  if(lstr>0){fwrite(settings.force_file,sizeof(char),lstr,fp);}
   if(settings.outputfile==NULL){lstr=0;} else {lstr=strlen(settings.outputfile);}
   fwrite(&lstr,sizeof(int),1,fp);
   if(lstr>0){fwrite(settings.outputfile,sizeof(char),lstr,fp);}
@@ -937,7 +1304,10 @@ void write_state(char * filename,state_settings_t settings,char * storefile){
   fwrite(settings.sizes,sizeof(int),settings.ncrbms+1,fp);
   fwrite(&settings.stage,sizeof(int),3,fp);
   fwrite(&settings.eta0,sizeof(double),1,fp);
-  fwrite(&settings.N_adapt_rate,sizeof(int),4,fp);
+  fwrite(&settings.N_adapt_rate,sizeof(int),5,fp);
+  fwrite(&settings.costwt,sizeof(double),1,fp);
+  fwrite(&settings.num_procs,sizeof(int),1,fp);
+  fwrite(&settings.enc_force_weight,sizeof(double),1,fp);
   if(storefile==NULL){lstr=0;} else {lstr=strlen(storefile);}
   fwrite(&lstr,sizeof(int),1,fp);
   if(lstr!=0){fwrite(storefile,sizeof(char),lstr,fp);}
@@ -945,11 +1315,20 @@ void write_state(char * filename,state_settings_t settings,char * storefile){
 #ifdef NATIVE_RAND
   sw=0;
 #else
+#ifdef ACML
+  sw=2;
+#else
   sw=1;
+#endif
 #endif
   fwrite(&sw,sizeof(int),1,fp);
 #ifndef NATIVE_RAND
+#ifdef ACML
+  fwrite(&lstate,sizeof(int),1,fp);
+  fwrite(&state,sizeof(int),lstate,fp);
+#else
   dump_twister_state(fp);
+#endif
 #endif
   fclose(fp);
 }
@@ -976,6 +1355,13 @@ state_settings_t load_state(char * filename,char **storefile){
   }
   fread(&lstr,sizeof(int),1,fp);
   if(lstr>0){
+    s.force_file=malloc(sizeof(char)*lstr);
+    fread(s.force_file,sizeof(char),lstr,fp);
+  } else {
+    s.force_file=NULL;
+  }
+  fread(&lstr,sizeof(int),1,fp);
+  if(lstr>0){
     s.outputfile=malloc(sizeof(char)*lstr);
     fread(s.outputfile,sizeof(char),lstr,fp);
   } else {
@@ -993,7 +1379,10 @@ state_settings_t load_state(char * filename,char **storefile){
   fread(s.sizes,sizeof(int),s.ncrbms+1,fp);
   fread(&s.stage,sizeof(int),3,fp);
   fread(&s.eta0,sizeof(double),1,fp);
-  fread(&s.N_adapt_rate,sizeof(int),4,fp);
+  fread(&s.N_adapt_rate,sizeof(int),5,fp);
+  fread(&s.costwt,sizeof(double),1,fp);
+  fread(&s.num_procs,sizeof(int),1,fp);
+  fread(&s.enc_force_weight,sizeof(double),1,fp);
   fread(&lstr,sizeof(int),1,fp);
   printf("lstr: %i\n",lstr);
   if(lstr>0){
@@ -1002,62 +1391,92 @@ state_settings_t load_state(char * filename,char **storefile){
   }
   fread(&sw,sizeof(int),1,fp);
 #ifdef NATIVE_RAND
-  if(sw==1){printf("*** Settings file is for Mersenne Twister prng ***\n");}
+  if(sw!=0){printf("*** Settings file is for different prng ***\n");}
 #else
   if(sw==0){
     printf("*** No random number state provided in settings file ***\n");
-  } else {
+  } else if(sw==1){
+#ifdef ACML
+    printf("*** Settings file is for non-ACML version; ignoring prng information... ***\n");
+#else
     load_twister_state(fp);
     seeded_random=1;
+#endif
+  } else if(sw==2){
+#ifdef ACML
+    fread(&lstate,sizeof(int),1,fp);
+    fread(&state,sizeof(int),lstate,fp);
+    seeded_random=1;
+#else
+    printf("*** Settings file is for ACML version; ignoring prng information... ***\n");
+#endif
+  } else {
+    printf("*** Unrecognised prng code; ignoring... ***\n");
   }
 #endif
   fclose(fp);
   return s;
 }
 
-void print_state(state_settings_t s){
-  printf("niter_crbm:  %4i     niter_auto: %5i\n",s.niter_crbm,s.niter_auto);
-  printf("stdev_init:  %.4f\n",s.stdev_init);
-  printf("noise_crbm:  %.4f   noise_auto: %.4f\n",s.noise_crbm,s.noise_auto);
-  printf("lrate_crbm:  %.4f   lrate_auto: %.4f\n",s.lrate_crbm,s.lrate_auto);
-  printf("f0:          %5.3f   f1:         %5.3f\n",s.f0,s.f1);
+void fprint_state(state_settings_t s,FILE * fp){
+  if(fp==NULL){fp=stdout;}
+  
+  fprintf(fp,"niter_crbm:  %4i     niter_auto: %5i\n",s.niter_crbm,s.niter_auto);
+  fprintf(fp,"stdev_init:  %.4f\n",s.stdev_init);
+  fprintf(fp,"noise_crbm:  %.4f   noise_auto: %.4f\n",s.noise_crbm,s.noise_auto);
+  fprintf(fp,"lrate_crbm:  %.4f   lrate_auto: %.4f\n",s.lrate_crbm,s.lrate_auto);
+  fprintf(fp,"f0:          %5.3f   f1:         %5.3f\n",s.f0,s.f1);
+  
   if(s.datafile==NULL){
-    printf("datafile:    --\n");
+    fprintf(fp,"datafile:    --\n");
   } else {
-    printf("datafile:    %s\n",s.datafile);
+    fprintf(fp,"datafile:    %s\n",s.datafile);
   }
   if(s.monitorfile==NULL){
-    printf("monitorfile: --\n");
+    fprintf(fp,"monitorfile: --\n");
   } else {
-    printf("monitorfile: %s\n",s.monitorfile);
+    fprintf(fp,"monitorfile: %s\n",s.monitorfile);
   }
   if(s.outputfile==NULL){
-    printf("outputfile:  --\n");
+    fprintf(fp,"outputfile:  --\n");
   } else {
-    printf("outputfile:  %s\n",s.outputfile);
+    fprintf(fp,"outputfile:  %s\n",s.outputfile);
+  }
+  if(s.force_file==NULL){
+    fprintf(fp,"force-file:  --\n");
+  } else {
+    fprintf(fp,"force-file:  %s\n",s.force_file);
   }
   if(s.logbase==NULL){
-    printf("logbase:     --\n");
+    fprintf(fp,"logbase:     --\n");
   } else {
-    printf("logbase:     %s\n",s.logbase);
+    fprintf(fp,"logbase:     %s\n",s.logbase);
   }
-  printf("ncrbms:      %i\n",s.ncrbms);
-  printf("sizes:       ");
+  fprintf(fp,"ncrbms:      %i\n",s.ncrbms);
+  fprintf(fp,"sizes:       ");
   int i;
   for(i=0;i<s.ncrbms+1;i++){
-    printf("%i ",*(s.sizes+i));
+    fprintf(fp,"%i ",*(s.sizes+i));
   }
-  printf("\n");
-  printf("stage:       %2i       iter:%i\n",s.stage,s.iter);
+  fprintf(fp,"\n");
+  fprintf(fp,"stage:       %2i       iter:%i\n",s.stage,s.iter);
 }
   
 
 autoenc_t * autoencoder_make_and_train(crbm_t *crbms,autoenc_t * a,state_settings_t settings){
-  dataset_t data,monitor,encoded1,encoded2,*tdata1=&encoded1,*tdata2=&encoded2,*tmp,*p2data=NULL,*p2monitor=NULL;
+  dataset_t data,monitor,encoded1,encoded2,enc_force,*tdata1=&encoded1,*tdata2=&encoded2,*tmp,*p2data=NULL,*p2monitor=NULL,*p2enc_force=NULL;
   char logfile[80];
   FILE *logfp=NULL;
   int i;
-  signal(SIGINT,abort_handler);
+  signal(SIGINT,abort_handler); // Handle Ctrl-C
+#ifdef _OPENMP
+  if(settings.num_procs>0){
+    omp_set_num_threads(settings.num_procs);
+    printf("Running in parallel on %i processors\n",settings.num_procs);
+  } else {
+    printf("Running in parallel on %i processors\n",omp_get_num_procs());
+  }
+#endif
   if(settings.datafile!=NULL){
     data=load_dataset(settings.datafile);
     if(settings.ignore_weights){
@@ -1065,6 +1484,9 @@ autoenc_t * autoencoder_make_and_train(crbm_t *crbms,autoenc_t * a,state_setting
     }
     p2data=&data;
     dataset_copy(&encoded1,&data);
+  } else {
+    printf("No training dataset provided. Aborting...\n");
+    exit(-1);
   }
   if(settings.monitorfile!=NULL){
     monitor=load_dataset(settings.monitorfile);
@@ -1072,7 +1494,11 @@ autoenc_t * autoencoder_make_and_train(crbm_t *crbms,autoenc_t * a,state_setting
       for(i=0;i<monitor.nrecs;i++){*(monitor.weight+i)=1.;}
     }
     p2monitor=&monitor;
-  }	
+  }
+  if(settings.force_file!=NULL){
+    enc_force=load_dataset(settings.force_file);
+    p2enc_force=&enc_force;
+  }
   if(settings.stage<settings.ncrbms){
     //There is some CRBM training to do...
     //Use any CRBMs that are provided to encode dataset
@@ -1100,7 +1526,12 @@ autoenc_t * autoencoder_make_and_train(crbm_t *crbms,autoenc_t * a,state_setting
       }
       if(settings.datafile!=NULL){
 	printf("Training for %i iterations...\n",settings.niter_crbm-settings.iter);
-	crbm_train(crbms+i,tdata1,&settings,logfp);
+	if(i==settings.ncrbms-1){
+	  //Only use force-file on bottom encoding layer
+	  crbm_train(crbms+i,tdata1,&settings,logfp,p2enc_force);
+	} else {
+	  crbm_train(crbms+i,tdata1,&settings,logfp,NULL);
+	}
 	printf("...done!\n");
       }
       if(i<settings.ncrbms-1 && settings.datafile!=NULL){
@@ -1123,15 +1554,15 @@ autoenc_t * autoencoder_make_and_train(crbm_t *crbms,autoenc_t * a,state_setting
       sprintf(&logfile[0],"%s.auto.log",settings.logbase,i+1);
     }
     if(settings.iter==0 && crbms!=NULL){
-      logfp=fopen(&logfile[0],"w");
+      if(settings.logbase!=NULL){logfp=fopen(&logfile[0],"w");}
       a=make_autoencoder(settings.ncrbms,crbms,logfp);
       for(i=0;i<settings.ncrbms;i++){crbm_free(crbms+i);}
     } else {
       //Hopefully something useful exists in 'a'
-      logfp=fopen(&logfile[0],"w+");
+      if(settings.logbase!=NULL){logfp=fopen(&logfile[0],"w+");}
     }
     if(settings.datafile!=NULL){
-      autoencoder_batchtrain(a,p2data,&settings,p2monitor,logfp);
+      autoencoder_batchtrain(a,p2data,&settings,p2monitor,logfp,p2enc_force);
     }
     save_autoencoder(settings.outputfile,a);
     char statefile[80];

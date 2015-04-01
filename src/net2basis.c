@@ -1,6 +1,8 @@
 #include<stdio.h>
 #include<stdlib.h>
+#ifndef ACML
 #include<cblas.h>
+#endif
 #include "autoencoder.h"
 
 int main(int argc, char *argv[]){
@@ -36,7 +38,11 @@ int main(int argc, char *argv[]){
   autoencoder_decode(a,&ones,&basis);
   
   double *correls=malloc(a->layers[a->nlayers/2].nin*a->layers[a->nlayers/2].nin*sizeof(double));
+#ifdef ACML
+  dgemm('N','T',a->layers[a->nlayers/2].nin,a->layers[a->nlayers/2].nin,a->layers[a->nlayers-1].nout,1.0,basis.data,a->layers[a->nlayers/2].nin,basis.data,a->layers[a->nlayers/2].nin,0.0,correls,a->layers[a->nlayers/2].nin);
+#else
   cblas_dgemm(CblasRowMajor,CblasTrans,CblasNoTrans,a->layers[a->nlayers/2].nin,a->layers[a->nlayers/2].nin,a->layers[a->nlayers-1].nout,1.0,basis.data,a->layers[a->nlayers/2].nin,basis.data,a->layers[a->nlayers/2].nin,0.0,correls,a->layers[a->nlayers/2].nin);
+#endif
   FILE * fp=fopen(datfile,"w");
   fprintf(fp,"# %i %s\n",a->layers[a->nlayers/2].nin,netfile);
   for(i=0;i<a->layers[a->nlayers/2].nin;i++){

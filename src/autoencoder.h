@@ -1,11 +1,28 @@
+///////////////////////////////////////////////////////////
+// autoencoder.h - Header file for autoencoder framework //
+///////////////////////////////////////////////////////////
+// Andrew Valentine                                      //
+// Universiteit Utrecht                                  //
+// 2011-2012                                             //
+///////////////////////////////////////////////////////////
+// $Id: autoencoder.h,v 1.3 2012/03/31 15:14:08 andrew Exp andrew $
+//
+// Compile with -DACML if using ACML library
+
 #ifndef _autoencoder_h_
 #define _autoencoder_h_
 #include <stdio.h>
+
+//At what point does it become worth incurring overhead cost of parallelism?
+// Stig: 256*128
+#define MIN_ARRSIZE_PARALLEL (256*128)
+
 
 // There is relatively little point in saving system state during CRBM training - each layer of CRBMs depends entirely on the
 // result of training the previous layer, so it is not possible to 'extend' the training.
 // Only possibility is to dump system state at end of first CRBM layer, so that this can be taken further?
 typedef struct state_settings {
+  //Structure to store system state information and parameters
   int niter_crbm;
   int niter_auto;
   double stdev_init;
@@ -17,6 +34,7 @@ typedef struct state_settings {
   double f1;
   char * datafile;
   char * monitorfile;
+  char * force_file;
   char * outputfile;
   char * logbase;
   int ncrbms;
@@ -31,10 +49,13 @@ typedef struct state_settings {
   int iter_reset;
   int ignore_weights;
   double costwt;
+  int num_procs;
+  double enc_force_weight;
 } state_settings_t;
 
 
 typedef struct dataset {
+  //Structure to wrap set of examples
   int npoints;
   int nrecs;
   double *data;
@@ -43,6 +64,7 @@ typedef struct dataset {
 } dataset_t;
 
 typedef struct crbm {
+  //Structure to encapsulate CRBM network
   int nlv;
   int nlh;
   double * w;
@@ -55,6 +77,7 @@ typedef struct crbm {
 } crbm_t;
 
 typedef struct layer {
+  //Structure to encapsulate single layer of autoencoder
   int nin;
   int nout;
   double loglo;
@@ -65,11 +88,13 @@ typedef struct layer {
 } layer_t;
 
 typedef struct autoenc {
+  //Structure to encapsulate autoencoder
   int nlayers;
   layer_t layers[];
 } autoenc_t;
 
 typedef struct node_val {
+  //Similar to layer but allows for storage of derivatives
   int n;
   double * values;
   double * derivs;
@@ -93,14 +118,21 @@ void dataset_copy(dataset_t *,dataset_t *);
 void dataset_resize(dataset_t *,int);
 dataset_t load_dataset(char *);
 void writedata(char *,dataset_t *);
+int get_binary_mode();
+void set_binary_mode(int);
 // Random number functions
 inline double random_normal();
+inline double random_uniform(double,double);
+#ifdef ACML
+void random_uniform_mem(double *,int,double,double);
+void random_normal_mem(double *,int,double);
+#endif
 //CRBM functions
 void crbm_init(crbm_t *,int,int,double,double,double,FILE *);
 void crbm_free(crbm_t *);
 void crbm_encode(crbm_t *,dataset_t *,dataset_t *,double);
 void crbm_decode(crbm_t *,dataset_t *,dataset_t *,double);
-void crbm_train(crbm_t *,dataset_t *,state_settings_t *,FILE *);
+void crbm_train(crbm_t *,dataset_t *,state_settings_t *,FILE *,dataset_t *);
 void write_crbm(FILE *,crbm_t *);
 void save_crbm(char *,crbm_t *);
 crbm_t read_crbm(FILE *);
@@ -115,7 +147,7 @@ void autoencoder_free(autoenc_t *);
 void autoencoder_encode(autoenc_t *,dataset_t *,dataset_t *);
 void autoencoder_decode(autoenc_t *,dataset_t *,dataset_t *);
 void autoencoder_encdec(autoenc_t *,node_val_t *,int);
-void  autoencoder_batchtrain(autoenc_t *,dataset_t*,state_settings_t *,dataset_t *,FILE *);
+void  autoencoder_batchtrain(autoenc_t *,dataset_t*,state_settings_t *,dataset_t *,FILE *,dataset_t *);
 // Miscellaneous functions
 void make_nodevals(autoenc_t *,node_val_t *,int);
 void nodevals_free(autoenc_t *,node_val_t *);
@@ -124,6 +156,7 @@ double error_array(double *,double *,int,int,double *);
 double len_enc_array(double *,int,int,double *);
 void abort_handler(int);
 void write_state(char *,state_settings_t,char *);
+void fprint_state(state_settings_t,FILE *);
 state_settings_t load_state(char *,char **);
 autoenc_t * autoencoder_make_and_train(crbm_t *,autoenc_t *,state_settings_t);
 #endif

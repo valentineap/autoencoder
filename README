@@ -1,0 +1,34 @@
+Autoencoder tools
+=================
+Andrew Valentine
+Universiteit Utrecht
+October 2011
+
+
+
+This set of programs implements autoencoder networks as described in
+
+Valentine, A.P. and Trampert, J., in review. Compression, quality assessment and searching of waveforms: Data-space reduction via autoencoder networks, Geophys. J. Int.
+
+Contents
+--------
+
++-- twister   <<< Mersenne Twister PRNG code >>>
+|   +-- Makefile
+|   +-- mt19937ar.h
+|   +-- mt19937ar.c
+|   +-- mt19937ar_test.c
+|   +-- readme-mt.txt
+|   +-- twisttools.c
+|
++-- compression
+|   +-- Makefile
+|   +-- auto_decode.c
+|   +-- auto_encode.c
+|   +-- auto_train.c
+|   +-- make_autoencoder.c
+|   +-- 
+
+
+
+

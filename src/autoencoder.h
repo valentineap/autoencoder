@@ -51,6 +51,14 @@ typedef struct state_settings {
   double costwt;
   int num_procs;
   double enc_force_weight;
+  int rprop_flag;
+  double etap;
+  double etam;
+  double delta0;
+  double delta_max;
+  double delta_min;
+  int no_wb;
+  int crbm_verbose_flag;
 } state_settings_t;
 
 
@@ -102,11 +110,18 @@ typedef struct node_val {
 
 
 
-///////////////////////
-// Logistic function //
-///////////////////////
-#define LOGISTIC(x) ((double)(1.L/(1.L+expl(-(long double)(x)))))
+//////////////////////////
+// Activation functions //
+//////////////////////////
 
+#define LOGISTIC(x) ((double)(1.L/(1.L+expl(-(long double)(x)))))
+#define TANH(x) ((double).5L*tanh((long double)(x))+.5L)
+
+#ifdef TANH_ACTIVATION
+  #define ACTIVATION TANH
+#else
+  #define ACTIVATION LOGISTIC
+#endif
 
 /////////////////////////
 // Function prototypes //
@@ -118,10 +133,10 @@ void dataset_copy(dataset_t *,dataset_t *);
 void dataset_resize(dataset_t *,int);
 dataset_t load_dataset(char *);
 void writedata(char *,dataset_t *);
-int get_binary_mode();
+int get_binary_mode(void);
 void set_binary_mode(int);
 // Random number functions
-inline double random_normal();
+inline double random_normal(void);
 inline double random_uniform(double,double);
 #ifdef ACML
 void random_uniform_mem(double *,int,double,double);
@@ -147,7 +162,9 @@ void autoencoder_free(autoenc_t *);
 void autoencoder_encode(autoenc_t *,dataset_t *,dataset_t *);
 void autoencoder_decode(autoenc_t *,dataset_t *,dataset_t *);
 void autoencoder_encdec(autoenc_t *,node_val_t *,int);
-void  autoencoder_batchtrain(autoenc_t *,dataset_t*,state_settings_t *,dataset_t *,FILE *,dataset_t *);
+void backpropagate_errors(autoenc_t *,dataset_t *,state_settings_t *,node_val_t *,dataset_t *, double **,double **,double **);
+void autoencoder_batchtrain(autoenc_t *,dataset_t*,state_settings_t *,dataset_t *,FILE *,dataset_t *);
+void autoencoder_batchtrain_rprop(autoenc_t *,dataset_t*,state_settings_t *,dataset_t *,FILE *,dataset_t *);
 // Miscellaneous functions
 void make_nodevals(autoenc_t *,node_val_t *,int);
 void nodevals_free(autoenc_t *,node_val_t *);
@@ -159,4 +176,5 @@ void write_state(char *,state_settings_t,char *);
 void fprint_state(state_settings_t,FILE *);
 state_settings_t load_state(char *,char **);
 autoenc_t * autoencoder_make_and_train(crbm_t *,autoenc_t *,state_settings_t);
+double avg_step_size(double **Dw, double **Da, double **Db, autoenc_t *a);
 #endif

@@ -37,7 +37,7 @@ int main(int argc, char * argv[]){
 #endif
 
     for(j=0;j<nodes[i].n;j++){
-      nodes[i].values[j]=a->layers[i-1].loglo+(a->layers[i-1].logup-a->layers[i-1].loglo)*(LOGISTIC(nodes[i].values[j]* *(a->layers[i-1].a+j)));
+      nodes[i].values[j]=a->layers[i-1].loglo+(a->layers[i-1].logup-a->layers[i-1].loglo)*(ACTIVATION(nodes[i].values[j]* *(a->layers[i-1].a+j)));
       nodes[i].derivs[j]=(nodes[i].values[j]-a->layers[i-1].loglo)*(a->layers[i-1].logup-nodes[i].values[j])/(a->layers[i-1].logup-a->layers[i-1].loglo);
     }
   }

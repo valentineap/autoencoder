@@ -1,20 +1,28 @@
-PROJECT=compression
-include $(MAKEDEFS)
+BINDIR=../bin
+OBJDIR=../obj
+LIBDIR=../lib
+MODDIR=../mod
+
+CCOMPILE=gcc -c -O3 -DNATIVE_RAND
+CLINK=gcc -O3 -L../lib -L/opt/local/lib
+
+LAPACK_COMPILE=-I/System/Library/Frameworks/Accelerate.framework/Versions/Current/Frameworks/vecLib.framework/Versions/Current/Headers/
+LAPACK_LINK=-L/System/Library/Frameworks/Accelerate.framework/Versions/Current/Frameworks/vecLib.framework/Versions/Current/ -lblas
 
 .PHONY: all clean ah2dat autoencoder auto_decode auto_encode auto_encdec auto_sensitivity auto_train convert_dataset_format cnet2dat cnet2txt make_autoencoder net2basis auto_predict merge_datasets print_state merge_dat
 
 
 
 #Aliases
-all: ah2dat auto_decode auto_encode auto_encdec auto_sensitivity convert_dataset_format cnet2dat cnet2txt make_autoencoder net2basis auto_predict merge_datasets print_state merge_dat
-clean: 
+all:  auto_decode auto_encode auto_encdec auto_sensitivity convert_dataset_format cnet2dat cnet2txt make_autoencoder net2basis merge_datasets print_state merge_dat
+clean:
 	rm $(BINDIR)/*
 	rm $(OBJDIR)/*
 	rm $(MODDIR)/*
 
 
 
-ah2dat: $(BINDIR)/ah2dat
+#ah2dat: $(BINDIR)/ah2dat
 autoencoder: $(OBJDIR)/autoencoder.o
 auto_decode: $(BINDIR)/auto_decode
 auto_encode: $(BINDIR)/auto_encode
@@ -32,8 +40,8 @@ net2basis: $(BINDIR)/net2basis
 print_state: $(BINDIR)/print_state
 
 #Binaries
-$(BINDIR)/ah2dat: $(OBJDIR)/autoencoder.o $(OBJDIR)/ah2dat.o
-	$(CLINK) $+ -o $@ $(CMATHLIBS) $(LAPACK_LINK) -L$(LIBDIR) -lah64 -ltwist
+#$(BINDIR)/ah2dat: $(OBJDIR)/autoencoder.o $(OBJDIR)/ah2dat.o
+#	$(CLINK) $+ -o $@ $(CMATHLIBS) $(LAPACK_LINK) -L$(LIBDIR) -lah64 -ltwist
 $(BINDIR)/auto_decode: $(OBJDIR)/autoencoder.o $(OBJDIR)/auto_decode.o
 	$(CLINK) $+ -o $@ $(CMATHLIBS) $(LAPACK_LINK) -ltwist
 $(BINDIR)/auto_encode: $(OBJDIR)/autoencoder.o $(OBJDIR)/auto_encode.o
@@ -96,6 +104,3 @@ $(OBJDIR)/net2basis.o: net2basis.c
 	$(CCOMPILE) $(LAPACK_COMPILE) $+ -o $@
 $(OBJDIR)/print_state.o: print_state.c
 	$(CCOMPILE) $(LAPACK_COMPILE) $+ -o $@
-
-
-

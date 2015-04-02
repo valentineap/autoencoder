@@ -1,4 +1,9 @@
-include $(MAKEDEFS)
+BINDIR=../bin
+OBJDIR=../obj
+LIBDIR=../lib
+
+CCOMPILE=gcc -c -O3
+CLINK=gcc -O3
 
 .PHONY: all libtwist mt19937ar mt19937ar_test twisttools
 all: libtwist mt19937ar mt19937ar_test twisttools
@@ -21,4 +26,3 @@ $(OBJDIR)/mt19937ar_test.o: mt19937ar_test.c mt19937ar.h
 	$(CCOMPILE) mt19937ar_test.c -o $@
 $(OBJDIR)/twisttools.o: twisttools.c mt19937ar.h
 	$(CCOMPILE) twisttools.c -o $@
-
